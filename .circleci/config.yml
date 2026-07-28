@@ -1,265 +1,31 @@
+# Use the latest 2.1 version of CircleCI pipeline process engine.
+# See: https://circleci.com/docs/reference/configuration-reference/
 version: 2.1
 
-parameters:
-  go_version_with_patch:
-    type: string
-    default: 1.26.4
-
-commands:
-  setup:
-    steps:
-      - checkout
-      - install-go
-      - install-task
-
-  install-go:
-    steps:
-      - run: circleci run circleci/setup-go@0.0.10-5577d2a -- --version << pipeline.parameters.go_version_with_patch >> --go-cache-checksum '{{ checksum "go.sum" }}_{{ checksum "tools/go.sum" }}'
-      - run: go version
-
-  install-task:
-    steps:
-      - run:
-          name: Install go-task
-          command: |
-            sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b "$HOME/.local/bin"
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
-
-  store_results:
-    steps:
-      - store_test_results:
-          path: ./test-reports
-
-executors:
-  linux:
-    machine:
-      image: ubuntu-2604:current
-    resource_class: large.gen2
-
-  macos:
-    macos:
-      xcode: 26.5.0
-
-  windows:
-    machine: true
-    resource_class: windows.medium
-
+# Define a job to be invoked later in a workflow.
+# See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#jobs-overview & https://circleci.com/docs/reference/configuration-reference/#jobs
 jobs:
-  check:
-    executor: linux
+  say-hello:
+    # Specify the execution environment. You can specify an image from Docker Hub or use one of our convenience images from CircleCI's Developer Hub.
+    # See: https://circleci.com/docs/guides/execution-managed/executor-intro/ & https://circleci.com/docs/reference/configuration-reference/#executor-job
+    docker:
+      # Specify the version you desire here
+      # See: https://circleci.com/developer/images/image/cimg/base
+      - image: cimg/base:current
+
+    # Add steps to the job
+    # See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#steps-overview & https://circleci.com/docs/reference/configuration-reference/#steps
     steps:
-      - setup
-      - run: task ci:check
-      - store_results
+      # Checkout the code as the first step.
+      - checkout
+      - run:
+          name: "Say hello"
+          command: "echo Hello, World!"
 
-  test:
-    parameters:
-      executor:
-        type: executor
-    executor: << parameters.executor >>
-    steps:
-      - setup
-      - run: task ci:test
-      - store_results
-
-  mark-release:
-    executor: linux
-    steps:
-      - run:
-          name: Plan deployment
-          command: |
-            circleci run release plan "${CIRCLE_JOB}" \
-              --environment-name="default" \
-              --component-name="${CIRCLE_PROJECT_REPONAME}" \
-              --target-version="1.0.${CIRCLE_BUILD_NUM}-${CIRCLE_SHA1:0:7}"
-      - run:
-          name: Update deployment status to running
-          command: circleci run release update "${CIRCLE_JOB}" --status=RUNNING
-      - run:
-          name: Update deployment status to success
-          command: circleci run release update "${CIRCLE_JOB}" --status=SUCCESS
-          when: on_success
-      - run:
-          name: Update deployment status to failed
-          command: circleci run release update "${CIRCLE_JOB}" --status=FAILED
-          when: on_fail
-
-  deploy:
-    executor: linux
-    parameters:
-      publish_steps:
-        type: steps
-        default:
-          - run: task ci:release
-    steps:
-      - setup
-      - run: sudo apt update --yes
-      - run:
-          name: Install snapcraft
-          command: |
-            sudo apt install snapd --yes
-            sudo snap install snapcraft --classic
-      - run:
-          name: Install choco
-          command: |
-            sudo cp tools/choco.sh /usr/local/bin/choco
-            sudo chmod +x /usr/local/bin/choco
-            choco help
-      - steps: << parameters.publish_steps >>
-      - store_artifacts:
-          path: dist
-
-  smoke-test-preview:
-    parameters:
-      executor:
-        type: executor
-      install-steps:
-        type: steps
-    executor: << parameters.executor >>
-    steps:
-      - steps: << parameters.install-steps >>
-      - run:
-          name: Verify circleci binary
-          command: circleci version
-
-  docs:
-    executor: linux
-    steps:
-      - setup
-      - run:
-          name: Generate reference and build the site
-          command: task docs:build
-      - run:
-          name: Check internal links
-          command: task docs:test
-      - store_artifacts:
-          path: docs/website/public
-      - persist_to_workspace:
-          root: .
-          paths:
-            - "docs/website/public"
-
-  docs-publish:
-    executor: linux
-    steps:
-      - setup
-      - attach_workspace:
-          at: .
-      - run:
-          name: Publish to gh-pages
-          command: task ci:docs:publish
-
-  ok-to-deploy:
-    type: no-op
-
+# Orchestrate jobs using workflows
+# See: https://circleci.com/docs/guides/orchestrate/workflows/ & https://circleci.com/docs/reference/configuration-reference/#workflows
 workflows:
-  ci:
+  say-hello-workflow: # This is the name of the workflow, feel free to change it to better match your workflow.
+    # Inside the workflow, you define the jobs you want to run.
     jobs:
-      # gh-pages holds only generated HTML — never run CI on it. Entry jobs (no
-      # `requires`) must opt out explicitly; downstream jobs are gated by these.
-
-      - check:
-          filters:
-            branches:
-              ignore: gh-pages
-
-      - test:
-          matrix:
-            parameters:
-              executor:
-                - linux
-                - macos
-                - windows
-          filters:
-            branches:
-              ignore: gh-pages
-
-      - docs:
-          filters:
-            branches:
-              ignore: gh-pages
-
-      - deploy:
-          name: dry-run
-          publish_steps:
-            - run: task ci:build
-          filters:
-            branches:
-              ignore:
-                - main
-                - gh-pages
-
-      - ok-to-deploy:
-          requires:
-            - check
-            - test
-            - docs
-          filters:
-            branches:
-              only: main
-
-      - mark-release:
-          requires:
-            - ok-to-deploy
-
-      - deploy:
-          serial-group: << pipeline.project.slug >>/deploy
-          requires:
-            - ok-to-deploy
-          context:
-            - devex-release
-            - macos-codesigning
-
-      - docs-publish:
-          serial-group: << pipeline.project.slug >>/docs-publish
-          requires:
-            - ok-to-deploy
-          context:
-            - devex-release
-
-      - smoke-test-preview:
-          name: smoke-test-snap
-          executor: linux
-          install-steps:
-            - run:
-                name: Install snapd
-                command: sudo apt update --yes && sudo apt install snapd --yes
-            - run:
-                name: Install circleci via Snap edge channel
-                command: sudo snap install circleci --channel=edge
-          requires:
-            - deploy
-          filters:
-            branches:
-              only: main
-
-      - smoke-test-preview:
-          name: smoke-test-brew
-          executor: macos
-          install-steps:
-            - run:
-                name: Install circleci via Homebrew preview tap
-                command: |
-                  brew update
-                  rm -f /opt/homebrew/bin/circleci
-                  brew tap circleci-public/homebrew-circleci
-                  brew trust circleci-public/homebrew-circleci
-                  brew install circleci@next
-          requires:
-            - deploy
-          filters:
-            branches:
-              only: main
-
-      - smoke-test-preview:
-          name: smoke-test-choco
-          executor: windows
-          install-steps:
-            - run:
-                name: Install circleci via Chocolatey pre-release
-                command: choco install circleci-cli --pre -y
-          requires:
-            - deploy
-          filters:
-            branches:
-              only: main
+      - say-hello
